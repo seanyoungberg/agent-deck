@@ -240,6 +240,23 @@ func WithGitConfig(path string) ContainerConfigOption {
 	}
 }
 
+// WithHooksDir mounts the host hooks status directory at the container's
+// default agent-deck hooks path. The in-container `agent-deck hook-handler`
+// resolves its hooks dir under $HOME, which sits on the read-only sandbox
+// rootfs — without this bridge its status writes fail silently and the host
+// watcher/notifier stays blind to sandboxed sessions.
+func WithHooksDir(hostDir string) ContainerConfigOption {
+	return func(cfg *ContainerConfig) {
+		if hostDir == "" {
+			return
+		}
+		cfg.volumes = append(cfg.volumes, VolumeMount{
+			hostPath:      hostDir,
+			containerPath: cfg.containerHome + "/.local/share/agent-deck/hooks",
+		})
+	}
+}
+
 // WithSSH mounts the host ~/.ssh directory read-only inside the container.
 func WithSSH(path string) ContainerConfigOption {
 	return func(cfg *ContainerConfig) {

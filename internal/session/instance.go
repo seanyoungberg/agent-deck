@@ -8178,6 +8178,15 @@ func buildSandboxConfig(
 		docker.WithAgentConfigs(bindMounts, homeMounts),
 	}
 
+	// Bridge in-container hook-handler status writes to the host hooks dir —
+	// the container's own hooks path sits on the read-only rootfs, so without
+	// this mount Stop/transition events from sandboxed sessions are lost.
+	if hooksDir := GetHooksDir(); hooksDir != "" {
+		if mkErr := os.MkdirAll(hooksDir, 0o700); mkErr == nil {
+			configOpts = append(configOpts, docker.WithHooksDir(hooksDir))
+		}
+	}
+
 	// Note: Docker.Environment names (e.g. TERM) are NOT forwarded at create time.
 	// They are forwarded at exec time via buildExecCommand with fresh host values.
 	// Only Docker.EnvironmentValues (static key=value pairs) are baked into the container.
