@@ -2419,9 +2419,16 @@ func cloneDefaultUserConfig() UserConfig {
 // the snapshot taken at cache time, so long-running processes (TUI, web,
 // notify-daemon) pick up external edits without requiring a full restart.
 // Regression: TestLoadUserConfig_PicksUpExternalEdits.
+//
+// userConfigCacheErr remembers a parse error alongside the cached default
+// config so cache hits keep returning it. Without it only the FIRST load
+// after an mtime change saw the error; every later call got (defaults, nil)
+// and a broken config.toml silently disabled all overrides with zero
+// diagnostics until the file's mtime changed again.
 var (
 	userConfigCache      *UserConfig
 	userConfigCacheMtime time.Time
+	userConfigCacheErr   error
 	userConfigCacheMu    sync.RWMutex
 )
 
@@ -2451,7 +2458,7 @@ func LoadUserConfig() (*UserConfig, error) {
 	userConfigCacheMu.RLock()
 	if userConfigCache != nil && currentMtime.Equal(userConfigCacheMtime) {
 		defer userConfigCacheMu.RUnlock()
-		return userConfigCache, nil
+		return userConfigCache, userConfigCacheErr
 	}
 	userConfigCacheMu.RUnlock()
 
@@ -2461,13 +2468,14 @@ func LoadUserConfig() (*UserConfig, error) {
 	// Re-check under write lock: another goroutine may have refreshed the
 	// cache to match currentMtime between our RLock drop and Lock acquire.
 	if userConfigCache != nil && currentMtime.Equal(userConfigCacheMtime) {
-		return userConfigCache, nil
+		return userConfigCache, userConfigCacheErr
 	}
 
 	if pathErr != nil {
 		fresh := cloneDefaultUserConfig()
 		userConfigCache = &fresh
 		userConfigCacheMtime = time.Time{}
+		userConfigCacheErr = nil
 		return userConfigCache, nil
 	}
 
@@ -2475,17 +2483,20 @@ func LoadUserConfig() (*UserConfig, error) {
 		fresh := cloneDefaultUserConfig()
 		userConfigCache = &fresh
 		userConfigCacheMtime = time.Time{}
+		userConfigCacheErr = nil
 		return userConfigCache, nil
 	}
 
 	var config UserConfig
 	if _, err := toml.DecodeFile(configPath, &config); err != nil {
-		// Cache default to prevent hot-looping on a broken file, but still
-		// return the error so the caller can surface it.
+		// Cache default to prevent hot-looping on a broken file, and cache
+		// the error too so every call (not just the first after the mtime
+		// change) can surface that the on-disk config is being ignored.
 		fresh := cloneDefaultUserConfig()
 		userConfigCache = &fresh
 		userConfigCacheMtime = currentMtime
-		return userConfigCache, fmt.Errorf("config.toml parse error: %w", err)
+		userConfigCacheErr = fmt.Errorf("config.toml parse error: %w", err)
+		return userConfigCache, userConfigCacheErr
 	}
 
 	if config.Tools == nil {
@@ -2502,6 +2513,7 @@ func LoadUserConfig() (*UserConfig, error) {
 
 	userConfigCache = &config
 	userConfigCacheMtime = currentMtime
+	userConfigCacheErr = nil
 	return userConfigCache, nil
 }
 
@@ -2731,6 +2743,7 @@ func ClearUserConfigCache() {
 	userConfigCacheMu.Lock()
 	userConfigCache = nil
 	userConfigCacheMtime = time.Time{}
+	userConfigCacheErr = nil
 	userConfigCacheMu.Unlock()
 }
 
