@@ -244,7 +244,7 @@ func TestRefreshAgentConfigs_ReturnsMounts(t *testing.T) {
 			require.Contains(t, m.hostPath, ".home-seeds")
 			data, err := os.ReadFile(m.hostPath)
 			require.NoError(t, err)
-			require.Equal(t, `{"hasCompletedOnboarding":true}`, string(data))
+			require.Equal(t, claudeHomeSeed, string(data))
 		}
 	}
 	require.True(t, found)
@@ -315,7 +315,7 @@ func TestRefreshAgentConfigs_HomeSeedFilesAlwaysRewritten(t *testing.T) {
 
 	data, err := os.ReadFile(seedPath)
 	require.NoError(t, err)
-	require.Equal(t, `{"hasCompletedOnboarding":true}`, string(data))
+	require.Equal(t, claudeHomeSeed, string(data))
 }
 
 func TestSyncAgentConfig_PreserveFiles(t *testing.T) {
