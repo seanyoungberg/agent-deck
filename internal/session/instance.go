@@ -785,9 +785,10 @@ func (i *Instance) buildClaudeCommandWithMessage(baseCommand, message string) st
 		baseCommand = "claude"
 	}
 
-	// Get the configured Claude command (e.g., "claude", "cdw", "cdp")
+	// Get the configured Claude command (e.g., "claude", "cdw", "cdp"),
+	// resolved per instance: conductor > group (ancestor-walk) > global.
 	// If a custom command is set, we skip CLAUDE_CONFIG_DIR prefix since the alias handles it
-	claudeCmd := GetClaudeCommand()
+	claudeCmd := GetClaudeCommandForInstance(i)
 	hasCustomCommand := claudeCmd != "claude"
 
 	// Resolve CLAUDE_CONFIG_DIR for this spawn. We inject the prefix only
@@ -1025,8 +1026,11 @@ func (i *Instance) buildClaudeExtraFlags(opts *ClaudeOptions) string {
 
 	// Options-level flags
 	if opts != nil {
-		if opts.Model != "" {
-			flags = append(flags, "--model "+shellescape.Quote(opts.Model))
+		// --model: explicit per-session model first, then the conductor /
+		// group model chain (resolveClaudeLaunchModel). Resolved here, at
+		// build time, so every Start/Restart/Fork picks up config changes.
+		if model := i.resolveClaudeLaunchModel(opts.Model); model != "" {
+			flags = append(flags, "--model "+shellescape.Quote(model))
 		}
 		if opts.SkipPermissions {
 			flags = append(flags, "--dangerously-skip-permissions")
@@ -6036,9 +6040,10 @@ func (i *Instance) buildClaudeResumeCommand() string {
 	// shell environment as freshly started ones (fixes #409).
 	envPrefix := i.buildEnvSourceCommand()
 
-	// Get the configured Claude command (e.g., "claude", "cdw", "cdp")
+	// Get the configured Claude command (e.g., "claude", "cdw", "cdp"),
+	// resolved per instance: conductor > group (ancestor-walk) > global.
 	// If a custom command is set, we skip CLAUDE_CONFIG_DIR prefix since the alias handles it
-	claudeCmd := GetClaudeCommand()
+	claudeCmd := GetClaudeCommandForInstance(i)
 	hasCustomCommand := claudeCmd != "claude"
 
 	// Resolve CLAUDE_CONFIG_DIR for this restart. Mirrors the gating logic
