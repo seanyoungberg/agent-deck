@@ -16,8 +16,10 @@ import (
 //  2. Global [shell].env_files (in order)
 //  3. [shell].init_script (for direnv, nvm, etc.)
 //  4. Tool-specific env_file ([claude].env_file, [gemini].env_file, [tools.X].env_file)
-//  5. Inline env vars from [tools.X].env
-//  6. Conductor-specific env from meta.json (highest priority, overrides tool env)
+//  5. Per-group / per-conductor inline env ([groups.X.claude].env, [conductors.X.claude].env)
+//  6. Inline env vars from [tools.X].env
+//  7. Conductor-specific env from meta.json (highest priority, overrides tool env)
+//  8. Strip TELEGRAM_STATE_DIR (v1.7.40, S8)
 //
 // Note: This does NOT handle [shell].launch_shell wrapping — that happens at the
 // prepareCommand layer (instance.go) after env sourcing, so the shell startup
@@ -97,17 +99,29 @@ func (i *Instance) buildEnvSourceCommand() string {
 		sources = append(sources, buildSourceCmd(resolved, ignoreMissing))
 	}
 
-	// 5. Inline env vars from [tools.X].env
+	// 5. Per-group / per-conductor inline env for claude sessions
+	//    ([groups.X.claude].env / [conductors.X.claude].env). Exported AFTER
+	//    the env_file source (step 4) so an inline key deterministically
+	//    wins over the same key from the file; the conductor map is applied
+	//    over the group map (CFG-08 precedence: conductor > group). Same
+	//    tool gate as the claude branch of getToolEnvFile.
+	if i.Tool == "claude" {
+		if claudeEnv := i.getClaudeInlineEnv(config); claudeEnv != "" {
+			sources = append(sources, claudeEnv)
+		}
+	}
+
+	// 6. Inline env vars from [tools.X].env
 	if inlineEnv := i.getToolInlineEnv(); inlineEnv != "" {
 		sources = append(sources, inlineEnv)
 	}
 
-	// 6. Conductor-specific env (highest priority, overrides tool env)
+	// 7. Conductor-specific env (highest priority, overrides tool env)
 	if conductorEnv := i.getConductorEnv(ignoreMissing); conductorEnv != "" {
 		sources = append(sources, conductorEnv)
 	}
 
-	// 7. S8 (v1.7.40) — strip TELEGRAM_STATE_DIR on every non-channel-owning
+	// 8. S8 (v1.7.40) — strip TELEGRAM_STATE_DIR on every non-channel-owning
 	// claude spawn. Fires AFTER all sources and inline env so it wins
 	// over any env_file / inline export that set the variable, and
 	// runs even when no env_file is in play (covers `agent-deck
@@ -281,6 +295,49 @@ func (i *Instance) getToolInlineEnv() string {
 		exports = append(exports, fmt.Sprintf("export %s='%s'", k, escaped))
 	}
 
+	return strings.Join(exports, " && ")
+}
+
+// getClaudeInlineEnv returns shell export statements for the merged
+// per-group / per-conductor inline env map ([groups.X.claude].env,
+// [conductors.X.claude].env). Merge order (later wins per key): ancestor
+// groups root-first → exact group → conductor block. Keys are sorted for
+// deterministic output; invalid env names are skipped and single quotes in
+// values are escaped — same rules as the conductor meta.json env
+// (getConductorEnv) and [tools.X].env (getToolInlineEnv).
+func (i *Instance) getClaudeInlineEnv(config *UserConfig) string {
+	if config == nil {
+		return ""
+	}
+	merged := config.GetGroupClaudeEnv(i.GroupPath) // freshly allocated; safe to overlay
+	if name := conductorNameFromInstance(i); name != "" {
+		if conductorEnv := config.GetConductorClaudeEnv(name); len(conductorEnv) > 0 {
+			if merged == nil {
+				merged = make(map[string]string, len(conductorEnv))
+			}
+			for k, v := range conductorEnv {
+				merged[k] = v
+			}
+		}
+	}
+	if len(merged) == 0 {
+		return ""
+	}
+
+	keys := make([]string, 0, len(merged))
+	for k := range merged {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	exports := make([]string, 0, len(keys))
+	for _, k := range keys {
+		if !isValidEnvKey(k) {
+			continue // skip invalid env var names
+		}
+		escaped := strings.ReplaceAll(merged[k], "'", "'\\''")
+		exports = append(exports, fmt.Sprintf("export %s='%s'", k, escaped))
+	}
 	return strings.Join(exports, " && ")
 }
 
