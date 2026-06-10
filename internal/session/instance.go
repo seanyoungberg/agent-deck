@@ -8069,7 +8069,7 @@ func ensureSandboxContainer(inst *Instance, userCfg *UserConfig, toolCommand str
 		return "", "", err
 	}
 
-	return buildExecCommand(ctr, userCfg, toolCommand), containerName, nil
+	return buildExecCommand(ctr, inst, userCfg, toolCommand), containerName, nil
 }
 
 // ensureContainerRunning creates and starts the container if it doesn't exist or is stopped.
@@ -8225,13 +8225,28 @@ func buildSandboxConfig(
 //
 // This prevents shell injection: toolCommand (which may contain user-controlled text
 // like session IDs) is passed as a single quoted argument to bash -c inside the container.
-func buildExecCommand(ctr *docker.Container, userCfg *UserConfig, toolCommand string) string {
+func buildExecCommand(ctr *docker.Container, inst *Instance, userCfg *UserConfig, toolCommand string) string {
 	// Always collect terminal env vars; append user-configured env var names.
 	var userNames []string
 	if userCfg != nil {
 		userNames = userCfg.Docker.Environment
 	}
 	runtimeEnv := collectDockerEnvVars(userNames)
+
+	// Parity: forward the agent-deck session identity into the container so that
+	// in-container hook subprocesses can identify this session — the same vars a
+	// host launch injects (see agentdeckEnvPrefix). Without AGENTDECK_INSTANCE_ID
+	// the `agent-deck hook-handler` exits silently (handleHookHandler returns on
+	// empty instance id) and loom's SessionStart hook records a null
+	// agentdeck_instance_id. Mirrors the host-launch AGENTDECK_* prefix.
+	if inst != nil {
+		runtimeEnv["AGENTDECK_INSTANCE_ID"] = inst.ID
+		runtimeEnv["AGENTDECK_TITLE"] = inst.Title
+		runtimeEnv["AGENTDECK_TOOL"] = inst.Tool
+		if inst.GroupPath != "" {
+			runtimeEnv["AGENTDECK_GROUP"] = inst.GroupPath
+		}
+	}
 
 	var prefix []string
 	if len(runtimeEnv) > 0 {
