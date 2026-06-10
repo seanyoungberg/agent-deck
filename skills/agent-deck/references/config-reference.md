@@ -31,12 +31,14 @@ All options for `~/.agent-deck/config.toml`.
 
 ```toml
 default_tool = "claude"   # Pre-selected tool when creating sessions
+default_path = ""         # Fallback project directory for add/launch without a path
 sync_title   = true       # Let agents rename sessions from their session-name
 ```
 
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
 | `default_tool` | string | `"claude"` | Pre-selected tool when creating sessions. |
+| `default_path` | string | `""` | Fallback project directory for `add` and `launch` when no path argument is given (#1303). Resolution chain: explicit path arg (including `.`, which always means the current directory) → target group's `default_path` (DB-resident, set via `group update` or the TUI) → this key → cwd. Supports `~` and `$VAR` expansion; silently skipped if the directory doesn't exist. |
 | `sync_title` | bool | `true` | When `true`, agent-deck overwrites a session's title with the agent's own session-name (e.g. Claude's `--name` / `/rename`, issues #572/#697). Set `false` to keep the title you gave the session — globally, for every tool. The per-session title-lock (`agent-deck session set-title-lock <id> on`) remains as a finer-grained override. Also toggleable in the TUI Settings panel (`S`) under **SESSIONS**. |
 
 ## [shell] Section
