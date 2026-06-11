@@ -587,12 +587,13 @@ type GroupClaudeSettings struct {
 	Env map[string]string `toml:"env,omitempty"`
 
 	// Skills lists declarative skill-loadout entries ("<source>/<name>")
-	// to attach to sessions in this group. Reserved schema home for the
-	// loadout follow-up; surfaced by `group show --resolved`.
+	// attached to sessions in this group at create and re-asserted on
+	// every start (ApplyConfiguredLoadout — attach-only floor semantics).
+	// Surfaced by `group show --resolved`.
 	Skills []string `toml:"skills,omitempty"`
 
-	// MCPs lists [mcps.X] catalog names to attach to sessions in this
-	// group. Reserved schema home for the loadout follow-up.
+	// MCPs lists [mcps.X] catalog names appended to the local .mcp.json
+	// of sessions in this group. Same floor semantics as Skills.
 	MCPs []string `toml:"mcps,omitempty"`
 }
 
@@ -646,12 +647,13 @@ type ConductorClaudeSettings struct {
 	// AFTER the group env map (conductor wins per key on conflict).
 	Env map[string]string `toml:"env,omitempty"`
 
-	// Skills lists declarative skill-loadout entries ("<source>/<name>").
-	// Reserved schema home for the loadout follow-up.
+	// Skills lists declarative skill-loadout entries ("<source>/<name>")
+	// unioned on top of the group floor for this conductor's sessions
+	// (ApplyConfiguredLoadout — attach-only floor semantics).
 	Skills []string `toml:"skills,omitempty"`
 
-	// MCPs lists [mcps.X] catalog names. Reserved schema home for the
-	// loadout follow-up.
+	// MCPs lists [mcps.X] catalog names unioned on top of the group
+	// floor. Same semantics as Skills.
 	MCPs []string `toml:"mcps,omitempty"`
 }
 
