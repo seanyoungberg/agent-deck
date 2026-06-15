@@ -4084,6 +4084,16 @@ func (i *Instance) UpdateHookStatus(status *HookStatus) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 
+	// Snapshot the prior hook-status fields so a candidate that fails the
+	// ownership check below can RESTORE them rather than leaving its status
+	// applied. This closes the `claude -p` env-pollution flip: a foreign
+	// ephemeral session (a `claude -p` child that inherited our
+	// AGENTDECK_INSTANCE_ID and fired hooks under our id) has no conversation
+	// data, so the bind is rejected — but previously the running/waiting status
+	// it carried had already been written here and stuck, flipping this
+	// instance's status. See the candidate_has_no_conversation_data branch.
+	prevHookStatus, prevHookEvent, prevHookLastUpdate := i.hookStatus, i.hookEvent, i.hookLastUpdate
+
 	// Detect whether this is genuinely new data (newer timestamp than last seen).
 	// Only reset acknowledgment on new events — not on re-application of the same
 	// stale hook file, which would undo the user's intentional acknowledge.
@@ -4144,6 +4154,13 @@ func (i *Instance) UpdateHookStatus(status *HookStatus) {
 		}
 		// v1.7.7 guard: candidate must have any conversation data at all.
 		if !sessionHasConversationData(i, sessionID) {
+			// A different session id with NO conversation data on an established
+			// instance is a foreign ephemeral (a `claude -p` child that inherited
+			// our AGENTDECK_INSTANCE_ID) — it doesn't own this instance, so its
+			// status must not stick either. Restore the pre-event status so the
+			// foreign hook is a no-op, not a flip. (A real /clear or fork carries
+			// conversation data and never reaches this branch.)
+			i.hookStatus, i.hookEvent, i.hookLastUpdate = prevHookStatus, prevHookEvent, prevHookLastUpdate
 			_ = WriteSessionIDLifecycleEvent(SessionIDLifecycleEvent{
 				InstanceID: i.ID, Tool: i.Tool, Action: "reject",
 				Source: hookSource, OldID: i.ClaudeSessionID, Candidate: sessionID,
