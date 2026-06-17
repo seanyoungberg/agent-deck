@@ -86,7 +86,7 @@ func printGroupHelp() {
 	fmt.Println()
 	fmt.Println("Commands:")
 	fmt.Println("  list              List all groups with session counts")
-	fmt.Println("  show <name>       Show one group; --resolved adds the effective claude config (alias: info)")
+	fmt.Println("  show <name>       Show one group; --resolved adds the effective claude/codex config (alias: info)")
 	fmt.Println("  create <name>     Create a new group")
 	fmt.Println("  update <name>     Update group settings")
 	fmt.Println("  delete <name>     Delete a group (aliases: rm, remove)")
@@ -97,6 +97,7 @@ func printGroupHelp() {
 	fmt.Println("Examples:")
 	fmt.Println("  agent-deck group list")
 	fmt.Println("  agent-deck group show work --resolved        # Verify the effective [groups.\"work\".claude] config")
+	fmt.Println("  agent-deck group show work --resolved --tool codex  # ... or the [groups.\"work\".codex] config")
 	fmt.Println("  agent-deck group create mobile")
 	fmt.Println("  agent-deck group create ios --parent mobile")
 	fmt.Println("  agent-deck group update mobile --default-path /path/to/repo")
@@ -358,7 +359,8 @@ func handleGroupList(profile string, args []string) {
 // silently degrading at launch.
 func handleGroupShow(profile string, args []string) {
 	fs := flag.NewFlagSet("group show", flag.ExitOnError)
-	resolved := fs.Bool("resolved", false, "Resolve the effective claude config for this group (sources included)")
+	resolved := fs.Bool("resolved", false, "Resolve the effective tool config for this group (sources included)")
+	tool := fs.String("tool", "claude", "Tool to resolve with --resolved (claude or codex)")
 	jsonOutput := fs.Bool("json", false, "Output as JSON")
 	quiet := fs.Bool("quiet", false, "Minimal output")
 	quietShort := fs.Bool("q", false, "Minimal output (short)")
@@ -374,6 +376,7 @@ func handleGroupShow(profile string, args []string) {
 		fmt.Println("Examples:")
 		fmt.Println("  agent-deck group show work")
 		fmt.Println("  agent-deck group show work --resolved")
+		fmt.Println("  agent-deck group show work --resolved --tool codex")
 		fmt.Println("  agent-deck group show work --resolved --json")
 	}
 
@@ -454,46 +457,89 @@ func handleGroupShow(profile string, args []string) {
 		// not a stale cache entry from an earlier call in this process
 		// (e.g. the log-config bootstrap in main()).
 		session.ClearUserConfigCache()
-		res := session.ResolveGroupClaude(groupPath)
-		jsonData["claude"] = res
 
-		b.WriteString("\nClaude config (resolved for a session in this group):\n")
-		if res.ConfigError != "" {
-			fmt.Fprintf(&b, "  !! config.toml ERROR — every value below is a DEFAULT; the file is being ignored:\n  !! %s\n", res.ConfigError)
-		}
-		fmt.Fprintf(&b, "  config_dir: %s  [%s]\n", orNone(res.ConfigDir), res.ConfigDirSource)
-		if res.EnvFile != "" {
-			existsNote := "MISSING"
-			if res.EnvFileExists {
-				existsNote = "exists"
-			} else if !filepath.IsAbs(res.EnvFileResolved) {
-				existsNote = "relative — resolved against each session's working dir"
+		switch strings.ToLower(strings.TrimSpace(*tool)) {
+		case "codex":
+			res := session.ResolveGroupCodex(groupPath)
+			jsonData["codex"] = res
+			b.WriteString("\nCodex config (resolved for a session in this group):\n")
+			if res.ConfigError != "" {
+				fmt.Fprintf(&b, "  !! config.toml ERROR — every value below is a DEFAULT; the file is being ignored:\n  !! %s\n", res.ConfigError)
 			}
-			fmt.Fprintf(&b, "  env_file:   %s  [%s]  (%s)\n", res.EnvFile, res.EnvFileSource, existsNote)
-		} else {
-			b.WriteString("  env_file:   (none)\n")
-		}
-		fmt.Fprintf(&b, "  command:    %s  [%s]\n", res.Command, res.CommandSource)
-		if res.Model != "" {
-			fmt.Fprintf(&b, "  model:      %s  [%s]\n", res.Model, res.ModelSource)
-		} else {
-			b.WriteString("  model:      (none — per-session model or Claude's own default)\n")
-		}
-		if len(res.Env) > 0 {
-			keys := make([]string, 0, len(res.Env))
-			for k := range res.Env {
-				keys = append(keys, k)
+			fmt.Fprintf(&b, "  config_dir: %s  [%s]\n", orNone(res.ConfigDir), res.ConfigDirSource)
+			if res.EnvFile != "" {
+				existsNote := "MISSING"
+				if res.EnvFileExists {
+					existsNote = "exists"
+				} else if !filepath.IsAbs(res.EnvFileResolved) {
+					existsNote = "relative — resolved against each session's working dir"
+				}
+				fmt.Fprintf(&b, "  env_file:   %s  [%s]  (%s)\n", res.EnvFile, res.EnvFileSource, existsNote)
+			} else {
+				b.WriteString("  env_file:   (none)\n")
 			}
-			sort.Strings(keys)
-			b.WriteString("  env:\n")
-			for _, k := range keys {
-				fmt.Fprintf(&b, "    %s=%s\n", k, res.Env[k])
+			fmt.Fprintf(&b, "  command:    %s  [%s]\n", res.Command, res.CommandSource)
+			if res.Model != "" {
+				fmt.Fprintf(&b, "  model:      %s  [%s]\n", res.Model, res.ModelSource)
+			} else {
+				b.WriteString("  model:      (none — per-session model or Codex's own default)\n")
 			}
-		} else {
-			b.WriteString("  env:        (none)\n")
+			fmt.Fprintf(&b, "  yolo:       %t  [%s]\n", res.Yolo, res.YoloSource)
+			if len(res.Env) > 0 {
+				keys := make([]string, 0, len(res.Env))
+				for k := range res.Env {
+					keys = append(keys, k)
+				}
+				sort.Strings(keys)
+				b.WriteString("  env:\n")
+				for _, k := range keys {
+					fmt.Fprintf(&b, "    %s=%s\n", k, res.Env[k])
+				}
+			} else {
+				b.WriteString("  env:        (none)\n")
+			}
+		default:
+			res := session.ResolveGroupClaude(groupPath)
+			jsonData["claude"] = res
+
+			b.WriteString("\nClaude config (resolved for a session in this group):\n")
+			if res.ConfigError != "" {
+				fmt.Fprintf(&b, "  !! config.toml ERROR — every value below is a DEFAULT; the file is being ignored:\n  !! %s\n", res.ConfigError)
+			}
+			fmt.Fprintf(&b, "  config_dir: %s  [%s]\n", orNone(res.ConfigDir), res.ConfigDirSource)
+			if res.EnvFile != "" {
+				existsNote := "MISSING"
+				if res.EnvFileExists {
+					existsNote = "exists"
+				} else if !filepath.IsAbs(res.EnvFileResolved) {
+					existsNote = "relative — resolved against each session's working dir"
+				}
+				fmt.Fprintf(&b, "  env_file:   %s  [%s]  (%s)\n", res.EnvFile, res.EnvFileSource, existsNote)
+			} else {
+				b.WriteString("  env_file:   (none)\n")
+			}
+			fmt.Fprintf(&b, "  command:    %s  [%s]\n", res.Command, res.CommandSource)
+			if res.Model != "" {
+				fmt.Fprintf(&b, "  model:      %s  [%s]\n", res.Model, res.ModelSource)
+			} else {
+				b.WriteString("  model:      (none — per-session model or Claude's own default)\n")
+			}
+			if len(res.Env) > 0 {
+				keys := make([]string, 0, len(res.Env))
+				for k := range res.Env {
+					keys = append(keys, k)
+				}
+				sort.Strings(keys)
+				b.WriteString("  env:\n")
+				for _, k := range keys {
+					fmt.Fprintf(&b, "    %s=%s\n", k, res.Env[k])
+				}
+			} else {
+				b.WriteString("  env:        (none)\n")
+			}
+			fmt.Fprintf(&b, "  skills:     %s\n", orNone(strings.Join(res.Skills, ", ")))
+			fmt.Fprintf(&b, "  mcps:       %s\n", orNone(strings.Join(res.MCPs, ", ")))
 		}
-		fmt.Fprintf(&b, "  skills:     %s\n", orNone(strings.Join(res.Skills, ", ")))
-		fmt.Fprintf(&b, "  mcps:       %s\n", orNone(strings.Join(res.MCPs, ", ")))
 	}
 
 	out.Print(b.String(), jsonData)
