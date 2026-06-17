@@ -636,6 +636,8 @@ type ProfileCodexSettings struct {
 type GroupSettings struct {
 	// Claude defines Claude Code overrides for a specific group.
 	Claude GroupClaudeSettings `toml:"claude,omitempty"`
+	// Codex defines Codex CLI overrides for a specific group.
+	Codex GroupCodexSettings `toml:"codex,omitempty"`
 	// Hermes defines Hermes overrides for a specific group.
 	Hermes GroupHermesSettings `toml:"hermes,omitempty"`
 }
@@ -680,6 +682,52 @@ type GroupClaudeSettings struct {
 	MCPs []string `toml:"mcps,omitempty"`
 }
 
+// GroupCodexSettings defines group-specific Codex overrides.
+//
+// The codex parallel to GroupClaudeSettings — same precedent the maintainer
+// leans on for [groups.X.claude] / [groups.X.hermes] and the already-shipped
+// [profiles.X.codex] block. Keep the key surface in sync with
+// ConductorCodexSettings (the two blocks are mirrors). New keys use omitempty
+// so SaveUserConfig does not emit zero-value fields into every group stanza
+// (see issue #1360).
+//
+// Codex semantics differ from claude in two places: ConfigDir maps to
+// CODEX_HOME (not CLAUDE_CONFIG_DIR), and Model/YoloMode become the codex
+// `--model` / `--yolo` launch flags. Skills/MCPs are deliberately absent —
+// those are claude-loadout-specific and codex does not consume them.
+type GroupCodexSettings struct {
+	// ConfigDir overrides the Codex home (CODEX_HOME) for sessions in this
+	// group. Resolution (per-instance): command-inline CODEX_HOME= >
+	// conductor > group (ancestor-walking) > $CODEX_HOME > profile >
+	// global [codex].config_dir > ~/.codex.
+	ConfigDir string `toml:"config_dir,omitempty"`
+
+	// EnvFile overrides [codex].env_file for sessions in this group.
+	EnvFile string `toml:"env_file,omitempty"`
+
+	// Command overrides [codex].command for sessions in this group (e.g. a
+	// wrapper like "codex-vertex"). Resolution: conductor > group
+	// (ancestor-walking) > global [codex].command > "codex".
+	Command string `toml:"command,omitempty"`
+
+	// Model is the model default for sessions in this group, emitted as the
+	// codex `--model` flag. An explicit per-session model (CLI/new-session
+	// dialog) wins; empty falls through (#1172 semantics).
+	Model string `toml:"model,omitempty"`
+
+	// Env is an inline env map exported in the spawn command AFTER the
+	// env_file source, so an inline key deterministically wins over the
+	// same key from the file. Precedent: [groups.X.claude].env.
+	Env map[string]string `toml:"env,omitempty"`
+
+	// YoloMode marks sessions in this group autonomous (codex `--yolo`:
+	// bypass approvals and sandbox). Tri-state pointer: nil inherits the
+	// global [codex].yolo_mode, explicit true/false overrides. The escape
+	// hatch for codex conductors that would otherwise stall on `on-request`
+	// approvals for agent-deck DB writes.
+	YoloMode *bool `toml:"yolo_mode,omitempty"`
+}
+
 // GroupHermesSettings defines group-specific Hermes overrides.
 type GroupHermesSettings struct {
 	Command      string `toml:"command,omitempty"`
@@ -702,6 +750,8 @@ type GroupHermesSettings struct {
 type ConductorOverrides struct {
 	// Claude defines Claude Code overrides for a specific conductor.
 	Claude ConductorClaudeSettings `toml:"claude,omitempty"`
+	// Codex defines Codex CLI overrides for a specific conductor.
+	Codex ConductorCodexSettings `toml:"codex,omitempty"`
 	// Hermes defines Hermes overrides for a specific conductor.
 	Hermes ConductorHermesSettings `toml:"hermes,omitempty"`
 }
@@ -737,6 +787,35 @@ type ConductorClaudeSettings struct {
 	// MCPs lists [mcps.X] catalog names. Reserved schema home for the
 	// loadout follow-up.
 	MCPs []string `toml:"mcps,omitempty"`
+}
+
+// ConductorCodexSettings defines conductor-specific Codex overrides.
+// Semantics mirror GroupCodexSettings — conductor beats group in the
+// resolution chain (CFG-08 precedence). Keyed by conductor name (Instance.Title
+// minus "conductor-" prefix via conductorNameFromInstance).
+type ConductorCodexSettings struct {
+	// ConfigDir overrides the Codex home (CODEX_HOME) for this conductor only.
+	ConfigDir string `toml:"config_dir,omitempty"`
+
+	// EnvFile is sourced before codex exec for this conductor.
+	EnvFile string `toml:"env_file,omitempty"`
+
+	// Command overrides [codex].command for this conductor only.
+	// Mirrors GroupCodexSettings.Command; conductor beats group.
+	Command string `toml:"command,omitempty"`
+
+	// Model is the model default for this conductor's sessions (codex
+	// `--model`). An explicit per-session model wins; empty falls through.
+	Model string `toml:"model,omitempty"`
+
+	// Env is an inline env map exported AFTER the env_file source and AFTER
+	// the group env map (conductor wins per key on conflict).
+	Env map[string]string `toml:"env,omitempty"`
+
+	// YoloMode marks this conductor autonomous (codex `--yolo`). Tri-state
+	// pointer: nil inherits group then global [codex].yolo_mode. Set true to
+	// keep a codex conductor from stalling on `on-request` approvals.
+	YoloMode *bool `toml:"yolo_mode,omitempty"`
 }
 
 // ConductorHermesSettings defines conductor-specific Hermes overrides.
@@ -1527,6 +1606,172 @@ func (c *UserConfig) GetConductorClaudeMCPs(name string) []string {
 		return nil
 	}
 	return c.Conductors[name].Claude.MCPs
+}
+
+// --- Codex per-group / per-conductor getters -----------------------------
+//
+// Twins of the GetGroupClaude* / GetConductorClaude* getters above, reading
+// the [groups.X.codex] / [conductors.X.codex] sub-tables. Same inheritance
+// semantics (group ancestor-walk; conductor beats group) so the two tool
+// families cannot drift.
+
+// GetGroupCodexConfigDir returns the group-specific Codex home (CODEX_HOME),
+// walking ancestor groups when the exact path has no override. Mirrors
+// GetGroupClaudeConfigDir.
+func (c *UserConfig) GetGroupCodexConfigDir(groupPath string) string {
+	if c == nil || groupPath == "" || c.Groups == nil {
+		return ""
+	}
+	for p := groupPath; p != ""; p = getParentPath(p) {
+		if groupCfg, ok := c.Groups[p]; ok && groupCfg.Codex.ConfigDir != "" {
+			return ExpandPath(groupCfg.Codex.ConfigDir)
+		}
+	}
+	return ""
+}
+
+// GetGroupCodexEnvFile returns the group-specific Codex env_file, walking
+// ancestor groups. Mirrors GetGroupClaudeEnvFile — no expansion here;
+// resolvePath handles it at the spawn-command build site (env.go).
+func (c *UserConfig) GetGroupCodexEnvFile(groupPath string) string {
+	v, _ := c.findGroupCodexSetting(groupPath, func(s GroupCodexSettings) string { return s.EnvFile })
+	return v
+}
+
+// findGroupCodexSetting walks the group ancestor chain (exact path first,
+// then each parent) and returns the first non-empty value the extractor
+// yields, plus the matched group path. Codex twin of findGroupClaudeSetting.
+func (c *UserConfig) findGroupCodexSetting(groupPath string, get func(GroupCodexSettings) string) (value, matchedGroup string) {
+	if c == nil || groupPath == "" || c.Groups == nil {
+		return "", ""
+	}
+	for p := groupPath; p != ""; p = getParentPath(p) {
+		if groupCfg, ok := c.Groups[p]; ok {
+			if v := get(groupCfg.Codex); v != "" {
+				return v, p
+			}
+		}
+	}
+	return "", ""
+}
+
+// GetGroupCodexCommand returns the group-specific Codex command, walking
+// ancestor groups. No path expansion — the value is a command/alias.
+func (c *UserConfig) GetGroupCodexCommand(groupPath string) string {
+	v, _ := c.findGroupCodexSetting(groupPath, func(s GroupCodexSettings) string { return s.Command })
+	return v
+}
+
+// GetGroupCodexModel returns the group-specific Codex model default, walking
+// ancestor groups.
+func (c *UserConfig) GetGroupCodexModel(groupPath string) string {
+	v, _ := c.findGroupCodexSetting(groupPath, func(s GroupCodexSettings) string { return s.Model })
+	return v
+}
+
+// GetGroupCodexEnv returns the merged inline env map for a group, merged
+// per-key root-first along the ancestor chain (nearest group wins on
+// conflict, parent-only keys persist). Mirrors GetGroupClaudeEnv. Returns a
+// freshly allocated map, nil when no level defines env.
+func (c *UserConfig) GetGroupCodexEnv(groupPath string) map[string]string {
+	if c == nil || groupPath == "" || c.Groups == nil {
+		return nil
+	}
+	var chain []map[string]string
+	for p := groupPath; p != ""; p = getParentPath(p) {
+		if groupCfg, ok := c.Groups[p]; ok && len(groupCfg.Codex.Env) > 0 {
+			chain = append(chain, groupCfg.Codex.Env)
+		}
+	}
+	if len(chain) == 0 {
+		return nil
+	}
+	merged := make(map[string]string)
+	for idx := len(chain) - 1; idx >= 0; idx-- {
+		for k, v := range chain[idx] {
+			merged[k] = v
+		}
+	}
+	return merged
+}
+
+// GetGroupCodexYolo returns the nearest group's [groups.X.codex].yolo_mode,
+// walking ancestor groups. Returns nil when no ancestor sets the key (caller
+// falls through to global [codex].yolo_mode). Tri-state pointer so an explicit
+// false at any level can pin a codex group non-autonomous.
+func (c *UserConfig) GetGroupCodexYolo(groupPath string) *bool {
+	if c == nil || groupPath == "" || c.Groups == nil {
+		return nil
+	}
+	for p := groupPath; p != ""; p = getParentPath(p) {
+		if groupCfg, ok := c.Groups[p]; ok && groupCfg.Codex.YoloMode != nil {
+			return groupCfg.Codex.YoloMode
+		}
+	}
+	return nil
+}
+
+// GetConductorCodexConfigDir returns the conductor-specific Codex home
+// (CODEX_HOME), if configured. Mirrors GetConductorClaudeConfigDir.
+func (c *UserConfig) GetConductorCodexConfigDir(name string) string {
+	if c == nil || name == "" || c.Conductors == nil {
+		return ""
+	}
+	conductorCfg, ok := c.Conductors[name]
+	if !ok || conductorCfg.Codex.ConfigDir == "" {
+		return ""
+	}
+	return ExpandPath(conductorCfg.Codex.ConfigDir)
+}
+
+// GetConductorCodexEnvFile returns the conductor-specific Codex env_file, if
+// configured. Mirrors GetConductorClaudeEnvFile.
+func (c *UserConfig) GetConductorCodexEnvFile(name string) string {
+	if c == nil || name == "" || c.Conductors == nil {
+		return ""
+	}
+	conductorCfg, ok := c.Conductors[name]
+	if !ok || conductorCfg.Codex.EnvFile == "" {
+		return ""
+	}
+	return conductorCfg.Codex.EnvFile
+}
+
+// GetConductorCodexCommand returns the conductor-specific Codex command, if
+// configured. Mirrors GetConductorClaudeCommand; conductor beats group.
+func (c *UserConfig) GetConductorCodexCommand(name string) string {
+	if c == nil || name == "" || c.Conductors == nil {
+		return ""
+	}
+	return c.Conductors[name].Codex.Command
+}
+
+// GetConductorCodexModel returns the conductor-specific Codex model default,
+// if configured. Mirrors GetConductorClaudeModel.
+func (c *UserConfig) GetConductorCodexModel(name string) string {
+	if c == nil || name == "" || c.Conductors == nil {
+		return ""
+	}
+	return c.Conductors[name].Codex.Model
+}
+
+// GetConductorCodexEnv returns the conductor-specific inline env map, if
+// configured. Applied over the group env map at spawn (conductor wins per
+// key). Mirrors GetConductorClaudeEnv.
+func (c *UserConfig) GetConductorCodexEnv(name string) map[string]string {
+	if c == nil || name == "" || c.Conductors == nil {
+		return nil
+	}
+	return c.Conductors[name].Codex.Env
+}
+
+// GetConductorCodexYolo returns the conductor-specific [conductors.X.codex].
+// yolo_mode, or nil when unset (caller falls through to group then global).
+func (c *UserConfig) GetConductorCodexYolo(name string) *bool {
+	if c == nil || name == "" || c.Conductors == nil {
+		return nil
+	}
+	return c.Conductors[name].Codex.YoloMode
 }
 
 // GetConductorHermesEnvFile returns the conductor-specific Hermes env_file,

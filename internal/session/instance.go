@@ -1369,8 +1369,25 @@ func (i *Instance) resolveCodexYoloFlag() string {
 		}
 		return ""
 	}
-	// Fallback to global config
+	// Conductor > group [*.codex].yolo_mode, then global [codex].yolo_mode.
+	// The per-conductor/group tri-state (*bool) lets a codex conductor be
+	// marked autonomous so it does not stall on `on-request` approvals for
+	// agent-deck DB writes; an explicit false at any level pins it back off.
 	if config, err := LoadUserConfig(); err == nil && config != nil {
+		if name := conductorNameFromInstance(i); name != "" {
+			if y := config.GetConductorCodexYolo(name); y != nil {
+				if *y {
+					return " --yolo"
+				}
+				return ""
+			}
+		}
+		if y := config.GetGroupCodexYolo(i.GroupPath); y != nil {
+			if *y {
+				return " --yolo"
+			}
+			return ""
+		}
 		if config.Codex.YoloMode {
 			return " --yolo"
 		}
@@ -1383,18 +1400,69 @@ func (i *Instance) resolveCodexModelFlag() string {
 	if opts != nil && strings.TrimSpace(opts.Model) != "" {
 		return " --model " + shellescape.Quote(strings.TrimSpace(opts.Model))
 	}
+	// Fall through to conductor > group model default (#1172 semantics:
+	// empty per-session model falls through; an explicit one wins). Resolved
+	// at command-build time so a config edit applies on the next start.
+	if m := i.resolveCodexLaunchModel(); m != "" {
+		return " --model " + shellescape.Quote(m)
+	}
 	return ""
+}
+
+// resolveCodexLaunchModel returns the conductor > group model default for a
+// codex spawn, or "" when no level sets one. Codex twin of
+// resolveClaudeLaunchModel (the global [codex] block has no model key, so
+// there is no global fallthrough — by design, matching codex's per-session
+// model surface).
+func (i *Instance) resolveCodexLaunchModel() string {
+	userConfig, _ := LoadUserConfig()
+	if userConfig == nil {
+		return ""
+	}
+	if name := conductorNameFromInstance(i); name != "" {
+		if m := userConfig.GetConductorCodexModel(name); m != "" {
+			return m
+		}
+	}
+	return userConfig.GetGroupCodexModel(i.GroupPath)
 }
 
 func (i *Instance) resolveCodexCommand(baseCommand string) string {
 	command := strings.TrimSpace(baseCommand)
 	if i.Tool == "codex" && (command == "" || command == "codex") {
-		return GetCodexCommand()
+		return GetCodexCommandForInstance(i)
 	}
 	if command == "" {
 		return "codex"
 	}
 	return command
+}
+
+// GetCodexCommandForInstance returns the Codex command for this Instance,
+// extending GetCodexCommand with the per-conductor / per-group levels. Codex
+// twin of GetClaudeCommandForInstance. Priority (most-specific first):
+//
+//  1. [conductors.<name>.codex].command — conductor sessions only
+//  2. [groups."<group>".codex].command — ancestor-walking
+//  3. [codex].command (global)
+//  4. "codex"
+//
+// An instance-level custom command (a non-"codex" command string) never
+// reaches this resolver — resolveCodexCommand only consults it when the stored
+// command is the default "codex", so the explicit per-session command stays
+// the strongest level.
+func GetCodexCommandForInstance(inst *Instance) string {
+	if userConfig, _ := LoadUserConfig(); userConfig != nil && inst != nil {
+		if name := conductorNameFromInstance(inst); name != "" {
+			if cmd := userConfig.GetConductorCodexCommand(name); cmd != "" {
+				return cmd
+			}
+		}
+		if cmd := userConfig.GetGroupCodexCommand(inst.GroupPath); cmd != "" {
+			return cmd
+		}
+	}
+	return GetCodexCommand()
 }
 
 func codexHomeFromCommand(command string) string {
@@ -1466,18 +1534,62 @@ func nextShellWord(s string) (word string, remainder string, ok bool) {
 	return b.String(), "", true
 }
 
-func getCodexHomeDirForCommand(command string) string {
-	if codexHome := codexHomeFromCommand(command); codexHome != "" {
-		return codexHome
-	}
-	return getCodexHomeDir()
-}
-
+// getCodexHomeDir resolves the Codex home (CODEX_HOME) for this Instance.
+// Per-instance TOML overrides (conductor > group) beat the global chain,
+// mirroring the claude config_dir instance chain (#881): an explicit
+// [conductors.X.codex] / [groups.X.codex].config_dir block is more specific
+// than a shell-wide $CODEX_HOME. An inline `CODEX_HOME=` token baked into the
+// command stays most-specific.
+//
+// Priority (most-specific first): command-inline CODEX_HOME= > conductor >
+// group > $CODEX_HOME env > [profiles.X.codex].config_dir > [codex].config_dir
+// > ~/.codex.
+//
+// Wiring conductor/group here also repairs the codex session_id FS-fallback
+// blind spot (spec §1.8 #3): detection resolves the per-conductor CODEX_HOME
+// instead of always scanning ~/.codex.
 func (i *Instance) getCodexHomeDir() string {
 	if i == nil {
 		return getCodexHomeDir()
 	}
-	return getCodexHomeDirForCommand(i.resolveCodexCommand(i.Command))
+	if codexHome := codexHomeFromCommand(i.resolveCodexCommand(i.Command)); codexHome != "" {
+		return codexHome
+	}
+	if cfg, err := LoadUserConfig(); err == nil && cfg != nil {
+		if name := conductorNameFromInstance(i); name != "" {
+			if dir := cfg.GetConductorCodexConfigDir(name); dir != "" {
+				return dir
+			}
+		}
+		if dir := cfg.GetGroupCodexConfigDir(i.GroupPath); dir != "" {
+			return dir
+		}
+	}
+	return getCodexHomeDir()
+}
+
+// isCodexHomeExplicit reports whether ANY level resolves an explicit Codex
+// home for this Instance — instance-aware twin of the package isCodexHomeExplicit.
+// Mirrors getCodexHomeDir's precedence so the CODEX_HOME= prefix in
+// buildCodexCommand is injected exactly when a non-default home is in effect.
+func (i *Instance) isCodexHomeExplicit() bool {
+	if i == nil {
+		return isCodexHomeExplicit()
+	}
+	if codexHomeFromCommand(i.resolveCodexCommand(i.Command)) != "" {
+		return true
+	}
+	if cfg, err := LoadUserConfig(); err == nil && cfg != nil {
+		if name := conductorNameFromInstance(i); name != "" {
+			if cfg.GetConductorCodexConfigDir(name) != "" {
+				return true
+			}
+		}
+		if cfg.GetGroupCodexConfigDir(i.GroupPath) != "" {
+			return true
+		}
+	}
+	return isCodexHomeExplicit()
 }
 
 // Codex stores sessions in ~/.codex/sessions/YYYY/MM/DD/*.jsonl
@@ -1507,8 +1619,8 @@ func (i *Instance) buildCodexCommand(baseCommand string) string {
 	if i.Tool == "codex" && trimmed != "codex" && trimmed != "" {
 		return envPrefix + trimmed
 	}
-	if isCodexHomeExplicit() {
-		codexHome := strings.TrimSpace(getCodexHomeDir())
+	if i.isCodexHomeExplicit() {
+		codexHome := strings.TrimSpace(i.getCodexHomeDir())
 		if codexHome != "" {
 			if err := os.MkdirAll(codexHome, 0o755); err != nil {
 				sessionLog.Warn("codex_home_mkdir_failed",
@@ -1522,7 +1634,7 @@ func (i *Instance) buildCodexCommand(baseCommand string) string {
 	yoloFlag := i.resolveCodexYoloFlag()
 	modelFlag := i.resolveCodexModelFlag()
 	command := i.resolveCodexCommand(baseCommand)
-	codexHome := getCodexHomeDirForCommand(command)
+	codexHome := i.getCodexHomeDir()
 
 	// Issue #756: Gate `codex resume <sid>` on rollout-file existence.
 	// If Codex died before flushing its rollout JSONL (tmux crash, kill -9
@@ -7044,8 +7156,8 @@ func (i *Instance) buildCodexForkCommandForTarget(target *Instance, baseCommand 
 	yoloFlag := target.resolveCodexYoloFlag()
 	modelFlag := target.resolveCodexModelFlag()
 	command := target.resolveCodexCommand(baseCommand)
-	if isCodexHomeExplicit() {
-		codexHome := strings.TrimSpace(getCodexHomeDir())
+	if target.isCodexHomeExplicit() {
+		codexHome := strings.TrimSpace(target.getCodexHomeDir())
 		if codexHome != "" {
 			if err := os.MkdirAll(codexHome, 0o755); err != nil {
 				sessionLog.Warn("codex_home_mkdir_failed",

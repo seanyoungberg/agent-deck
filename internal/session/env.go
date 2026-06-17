@@ -16,7 +16,7 @@ import (
 //  2. Global [shell].env_files (in order)
 //  3. [shell].init_script (for direnv, nvm, etc.)
 //  4. Tool-specific env_file ([claude].env_file, [gemini].env_file, [tools.X].env_file)
-//  5. Per-group / per-conductor inline env ([groups.X.claude].env, [conductors.X.claude].env)
+//  5. Per-group / per-conductor inline env ([groups.X.{claude,codex}].env, [conductors.X.{claude,codex}].env)
 //  6. Inline env vars from [tools.X].env
 //  7. Conductor-specific env from meta.json (highest priority, overrides tool env)
 //  8. Strip TELEGRAM_STATE_DIR (v1.7.40, S8)
@@ -108,6 +108,14 @@ func (i *Instance) buildEnvSourceCommand() string {
 	if i.Tool == "claude" {
 		if claudeEnv := i.getClaudeInlineEnv(config); claudeEnv != "" {
 			sources = append(sources, claudeEnv)
+		}
+	} else if IsCodexCompatible(i.Tool) {
+		// Codex twin of the claude branch: [groups.X.codex].env /
+		// [conductors.X.codex].env. Same export-after-env_file ordering and
+		// conductor-over-group precedence. Gated on IsCodexCompatible so
+		// custom codex-wrapping tools also receive the inline env.
+		if codexEnv := i.getCodexInlineEnv(config); codexEnv != "" {
+			sources = append(sources, codexEnv)
 		}
 	}
 
@@ -341,6 +349,47 @@ func (i *Instance) getClaudeInlineEnv(config *UserConfig) string {
 	return strings.Join(exports, " && ")
 }
 
+// getCodexInlineEnv returns shell export statements for the merged per-group /
+// per-conductor inline env map ([groups.X.codex].env, [conductors.X.codex].env).
+// Codex twin of getClaudeInlineEnv: merge order (later wins per key) is ancestor
+// groups root-first → exact group → conductor block. Keys sorted, invalid env
+// names skipped, single quotes escaped.
+func (i *Instance) getCodexInlineEnv(config *UserConfig) string {
+	if config == nil {
+		return ""
+	}
+	merged := config.GetGroupCodexEnv(i.GroupPath) // freshly allocated; safe to overlay
+	if name := conductorNameFromInstance(i); name != "" {
+		if conductorEnv := config.GetConductorCodexEnv(name); len(conductorEnv) > 0 {
+			if merged == nil {
+				merged = make(map[string]string, len(conductorEnv))
+			}
+			for k, v := range conductorEnv {
+				merged[k] = v
+			}
+		}
+	}
+	if len(merged) == 0 {
+		return ""
+	}
+
+	keys := make([]string, 0, len(merged))
+	for k := range merged {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	exports := make([]string, 0, len(keys))
+	for _, k := range keys {
+		if !isValidEnvKey(k) {
+			continue // skip invalid env var names
+		}
+		escaped := strings.ReplaceAll(merged[k], "'", "'\\''")
+		exports = append(exports, fmt.Sprintf("export %s='%s'", k, escaped))
+	}
+	return strings.Join(exports, " && ")
+}
+
 // getToolEnvFile returns the env_file setting for the current tool.
 // For Claude sessions, group-specific env_file takes priority over global [claude].env_file.
 func (i *Instance) getToolEnvFile() string {
@@ -371,6 +420,17 @@ func (i *Instance) getToolEnvFile() string {
 	case "opencode":
 		return config.OpenCode.EnvFile
 	case "codex":
+		// Conductor block wins over group (CFG-08 precedence), mirroring the
+		// claude branch. Separate from getConductorEnv (meta.json env_file) —
+		// both can be set; this is the config.toml [*.codex] layer.
+		if name := conductorNameFromInstance(i); name != "" {
+			if conductorEnv := config.GetConductorCodexEnvFile(name); conductorEnv != "" {
+				return conductorEnv
+			}
+		}
+		if groupEnv := config.GetGroupCodexEnvFile(i.GroupPath); groupEnv != "" {
+			return groupEnv
+		}
 		return config.Codex.EnvFile
 	case "copilot":
 		return config.Copilot.EnvFile
