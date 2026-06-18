@@ -118,7 +118,7 @@ func TestUpdateHookStatus_LegitRebindWithData_NotSuppressed(t *testing.T) {
 	newPath := seedClaudeJSONL(t, inst, newID, 1, 8) // smaller-but-fresh: the /clear shape
 
 	now := time.Now()
-	oldMtime := now.Add(-clearRebindMtimeGrace)
+	oldMtime := now.Add(-clearRebindMtimeGrace - time.Second)
 	if err := os.Chtimes(oldPath, oldMtime, oldMtime); err != nil {
 		t.Fatalf("chtimes old: %v", err)
 	}
