@@ -201,6 +201,10 @@ func TestLogProbeStall_RateLimited(t *testing.T) {
 	d, _ := bootstrapDaemonProfile(t, profile)
 
 	path := notifierProbeStallLogPath()
+	// Truncate before writing so entries from earlier tests don't inflate the count.
+	if err := os.Truncate(path, 0); err != nil && !os.IsNotExist(err) {
+		t.Fatalf("truncate probe-stall log: %v", err)
+	}
 	for i := 0; i < 5; i++ {
 		d.logProbeStall(profile, "hung", "probe_budget")
 	}
