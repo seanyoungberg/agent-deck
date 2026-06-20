@@ -8409,6 +8409,14 @@ func buildSandboxConfig(
 		perInstanceDir := filepath.Join(hooksDir, "sandbox", inst.ID)
 		if mkErr := os.MkdirAll(perInstanceDir, 0o700); mkErr == nil {
 			configOpts = append(configOpts, docker.WithHooksDir(perInstanceDir))
+		} else {
+			// Don't fail the spawn, but surface it: without the scoped hooks dir
+			// the bridge mount is silently skipped, leaving the host watcher blind
+			// to this sandboxed session — the exact problem this bridge solves.
+			sessionLog.Warn("scoped_hooks_dir_create_failed",
+				slog.String("instance_id", inst.ID),
+				slog.String("dir", perInstanceDir),
+				slog.String("error", mkErr.Error()))
 		}
 	}
 
