@@ -1,9 +1,5 @@
 package session
 
-import (
-	"os"
-)
-
 // GroupClaudeResolution is the resolved view of the effective Claude
 // configuration for a group path — what a session created in that group
 // would actually launch with. Built for `agent-deck group show --resolved`
@@ -79,19 +75,16 @@ func ResolveGroupClaude(groupPath string) GroupClaudeResolution {
 	}
 	if res.EnvFile != "" {
 		res.EnvFileResolved = ExpandPath(res.EnvFile)
-		// Route the existence probe through the same boundary-aware,
-		// symlink-resolving guard as the spawn-time env_file probe
-		// (validateEnvFileForProbe). os.Stat follows symlinks, so a lexically
-		// in-home env_file that is a symlink to an out-of-root file would
-		// otherwise probe outside the home root from this diagnostic path
-		// (CodeQL alert 54 — second sink). There is no session project in a
-		// group-level view, so the operator home is the only probe root; an
-		// absolute env_file outside it (or escaping via symlink) is not
-		// probed and EnvFileExists stays false.
-		if probedPath, ok := validateEnvFileForProbe(res.EnvFileResolved, ""); ok {
-			_, statErr := os.Stat(probedPath)
-			res.EnvFileExists = statErr == nil
-		}
+		// Route the existence probe through statEnvFileProbe — the same
+		// fail-closed, boundary-aware, symlink-resolving guard (with the
+		// sink-local traversal barrier) as the spawn-time env_file probe.
+		// os.Stat follows symlinks, so a lexically in-home env_file that is a
+		// symlink to an out-of-root file must not probe outside the home root
+		// from this diagnostic path (CodeQL go/path-injection — second sink).
+		// There is no session project in a group-level view, so the operator
+		// home is the only probe root; an absolute env_file outside it (or
+		// escaping via symlink, or never probed) leaves EnvFileExists false.
+		_, res.EnvFileExists, _ = statEnvFileProbe(res.EnvFileResolved, "")
 	}
 
 	// command — group chain → global [claude].command → "claude".

@@ -82,32 +82,29 @@ func (i *Instance) buildEnvSourceCommand() string {
 	toolEnvFile := i.getToolEnvFile()
 	if toolEnvFile != "" {
 		resolved := resolvePath(toolEnvFile, i.ProjectPath)
-		// CodeQL alert 54 (uncontrolled data in path expression): env_file is
-		// operator config and flows unsanitized into the os.Stat path sink
-		// below. Gate the stat behind a boundary-aware, fail-closed check —
-		// probedPath is returned only when the resolved file sits under a root
-		// agent-deck legitimately probes (the operator's home or the session's
-		// project tree). The stat is purely a proactive "configured-but-missing"
-		// diagnostic; the file is sourced regardless via buildSourceCmd below
-		// (whose `[ -f ]` guard covers a genuinely missing file), so an env_file
-		// the operator deliberately placed outside those roots skips the probe
-		// but is still sourced — no feature is lost and tainted config never
-		// reaches the filesystem sink unvalidated. Mirrors ValidateTranscriptPath
-		// (#1435) and the conductor_migrate_dir.go containment precedent.
-		if probedPath, ok := validateEnvFileForProbe(resolved, i.ProjectPath); ok {
-			if _, statErr := os.Stat(probedPath); statErr != nil {
-				// An explicitly configured env_file that is absent at spawn is a
-				// misconfiguration, not a soft default — the silent `[ -f ] &&`
-				// skip below is exactly how a typo'd env_file stanza goes
-				// unnoticed. Warn in the pane and the debug log; the
-				// ignore_missing_env_files=false hard-fail path is unchanged.
-				sessionLog.Warn("configured env_file missing at spawn",
-					slog.String("session", i.Title),
-					slog.String("tool", i.Tool),
-					slog.String("env_file", probedPath))
-				if ignoreMissing {
-					sources = append(sources, paneWarning("env_file not found: "+probedPath))
-				}
+		// CodeQL go/path-injection (uncontrolled data in path expression):
+		// env_file is operator config and an env-var value can flow through
+		// os.ExpandEnv (resolvePath → ExpandPath) into the os.Stat path sink.
+		// statEnvFileProbe owns the stat behind a fail-closed, boundary-aware
+		// guard with a canonical traversal barrier colocated at the sink, so
+		// the taint flow is broken before any stat runs. The probe is purely a
+		// proactive "configured-but-missing" diagnostic; the file is sourced
+		// regardless via buildSourceCmd below (whose `[ -f ]` guard covers a
+		// genuinely missing file), so an env_file the operator deliberately
+		// placed outside the probe roots skips the probe but is still sourced —
+		// no feature is lost.
+		if probedPath, exists, probed := statEnvFileProbe(resolved, i.ProjectPath); probed && !exists {
+			// An explicitly configured env_file that is absent at spawn is a
+			// misconfiguration, not a soft default — the silent `[ -f ] &&`
+			// skip below is exactly how a typo'd env_file stanza goes
+			// unnoticed. Warn in the pane and the debug log; the
+			// ignore_missing_env_files=false hard-fail path is unchanged.
+			sessionLog.Warn("configured env_file missing at spawn",
+				slog.String("session", i.Title),
+				slog.String("tool", i.Tool),
+				slog.String("env_file", probedPath))
+			if ignoreMissing {
+				sources = append(sources, paneWarning("env_file not found: "+probedPath))
 			}
 		}
 		sources = append(sources, buildSourceCmd(resolved, ignoreMissing))
@@ -247,8 +244,44 @@ func resolvePath(path, workDir string) string {
 	return filepath.Clean(filepath.Join(workDir, expanded))
 }
 
+// statEnvFileProbe is the single os.Stat sink for the "configured-but-missing"
+// env_file diagnostic, shared by buildEnvSourceCommand and the `group show
+// --resolved` view. It returns:
+//
+//	probed == false → the path failed validation and was NOT statted; callers
+//	                  must not treat the absent stat as "missing" (it was never
+//	                  probed). exists is false.
+//	probed == true  → the path was validated and statted; exists reports
+//	                  whether os.Stat succeeded.
+//
+// CodeQL go/path-injection (uncontrolled data in path expression): an env-var
+// value can flow through os.ExpandEnv (resolvePath → ExpandPath) into a path
+// that reaches os.Stat. validateEnvFileForProbe does the genuine, fail-closed
+// safety work (absolute-only, home/project containment, symlink-resolved
+// re-check), but its containment guard is interprocedural and runtime-rooted —
+// not a shape the taint tracker treats as a sanitizer, which is why the prior
+// guard-in-a-separate-function fix did not clear the alert. The fix is to
+// colocate the canonical traversal barrier (`strings.Contains(clean, "..")`,
+// the form CodeQL recognizes) with the os.Stat call in THIS function, so the
+// barrier dominates the exact value reaching the sink and breaks the flow.
+// filepath.Clean already neutralizes traversal on the absolute paths
+// validateEnvFileForProbe admits, so this barrier rejects nothing legitimate;
+// it re-states the invariant in a sink-local, tracker-legible form.
+func statEnvFileProbe(resolved, projectPath string) (probedPath string, exists, probed bool) {
+	clean, ok := validateEnvFileForProbe(resolved, projectPath)
+	if !ok {
+		return "", false, false
+	}
+	// Canonical traversal barrier, colocated with the os.Stat sink below.
+	if strings.Contains(clean, "..") {
+		return "", false, false
+	}
+	_, statErr := os.Stat(clean)
+	return clean, statErr == nil, true
+}
+
 // validateEnvFileForProbe is the boundary guard for the os.Stat sink in
-// buildEnvSourceCommand (CodeQL alert 54). It returns the cleaned path together
+// statEnvFileProbe (CodeQL go/path-injection). It returns the cleaned path together
 // with ok=true ONLY when the resolved env_file is an absolute path containing no
 // traversal segment AND both its lexical string AND its symlink-resolved real
 // location sit under a root agent-deck legitimately probes: the operator's home

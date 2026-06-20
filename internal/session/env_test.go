@@ -604,6 +604,35 @@ func TestValidateEnvFileForProbe_SymlinkEscape(t *testing.T) {
 	}
 }
 
+// TestStatEnvFileProbe exercises the shared os.Stat sink wrapper: a real
+// in-root file reports (probed, exists); a missing-but-eligible in-root file
+// reports (probed, !exists); and an out-of-root / traversal path is never
+// probed (probed==false, exists==false) so the diagnostic cannot treat an
+// unvalidated path as "missing".
+func TestStatEnvFileProbe(t *testing.T) {
+	project := t.TempDir()
+
+	real := filepath.Join(project, "real.env")
+	if err := os.WriteFile(real, []byte("X=1"), 0o600); err != nil {
+		t.Fatalf("write real: %v", err)
+	}
+	if got, exists, probed := statEnvFileProbe(real, project); !probed || !exists || got != real {
+		t.Errorf("real in-project env_file: got (%q, exists=%v, probed=%v), want (%q, true, true)", got, exists, probed, real)
+	}
+
+	missing := filepath.Join(project, "missing.env")
+	if got, exists, probed := statEnvFileProbe(missing, project); !probed || exists || got != missing {
+		t.Errorf("missing in-project env_file: got (%q, exists=%v, probed=%v), want (%q, false, true)", got, exists, probed, missing)
+	}
+
+	// Out-of-root and traversal-bearing paths must never be probed.
+	for _, p := range []string{"/etc/passwd", filepath.Join(project, "..", "escape.env"), ".env", ""} {
+		if got, exists, probed := statEnvFileProbe(p, project); probed || exists {
+			t.Errorf("unvalidated path %q must not be probed; got (%q, exists=%v, probed=%v)", p, got, exists, probed)
+		}
+	}
+}
+
 func TestIsValidEnvKey(t *testing.T) {
 	valid := []string{"HOME", "MY_VAR", "_private", "A", "API_KEY_123"}
 	for _, k := range valid {
