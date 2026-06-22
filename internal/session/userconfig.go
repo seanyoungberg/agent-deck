@@ -1531,7 +1531,18 @@ func (c *UserConfig) GetConductorClaudeEnv(name string) map[string]string {
 	if c == nil || name == "" || c.Conductors == nil {
 		return nil
 	}
-	return c.Conductors[name].Claude.Env
+	src := c.Conductors[name].Claude.Env
+	if len(src) == 0 {
+		return nil
+	}
+	// Defensive copy: never hand callers the live cached map. A caller
+	// mutating it would silently corrupt the cached config and race
+	// concurrent readers. Mirrors the fresh map GetGroupClaudeEnv returns.
+	cp := make(map[string]string, len(src))
+	for k, v := range src {
+		cp[k] = v
+	}
+	return cp
 }
 
 // GetConductorClaudeSkills returns the conductor-specific skill-loadout
@@ -1541,7 +1552,13 @@ func (c *UserConfig) GetConductorClaudeSkills(name string) []string {
 	if c == nil || name == "" || c.Conductors == nil {
 		return nil
 	}
-	return c.Conductors[name].Claude.Skills
+	src := c.Conductors[name].Claude.Skills
+	if len(src) == 0 {
+		return nil
+	}
+	// Defensive copy — see GetConductorClaudeEnv. Callers must not mutate the
+	// cached slice; GetGroupClaudeSkills likewise returns a fresh union slice.
+	return append([]string(nil), src...)
 }
 
 // GetConductorClaudeMCPs returns the conductor-specific [mcps.X] catalog
@@ -1550,7 +1567,12 @@ func (c *UserConfig) GetConductorClaudeMCPs(name string) []string {
 	if c == nil || name == "" || c.Conductors == nil {
 		return nil
 	}
-	return c.Conductors[name].Claude.MCPs
+	src := c.Conductors[name].Claude.MCPs
+	if len(src) == 0 {
+		return nil
+	}
+	// Defensive copy — see GetConductorClaudeEnv.
+	return append([]string(nil), src...)
 }
 
 // GetConductorHermesEnvFile returns the conductor-specific Hermes env_file,
